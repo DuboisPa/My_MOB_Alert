@@ -214,7 +214,7 @@ class tAISPayloadBuilder {
       uint8_t payloadLen = 0;
 };
 
-bool gGNSSFixValid, bGNSSLedStatus = false;  // true si un fix RMC ou GGA valide a ete recu
+bool bGNSS_StillValid = false;  // true si un fix RMC ou GGA valide a ete recu
 uint32_t GNSSFixValidMillis;
 uint32_t newMillis, oldMillis, oldMOBMillis;
 
@@ -361,11 +361,9 @@ void Handle_GNSS_NMEA0183Msg(const tNMEA0183Msg &N0183Msg) {
    int      gDGPSReferenceStationID;
    
    if (N0183Msg.IsMessageCode("RMC")) {
-      gGNSSFixValid = false;
-      // NMEA0183ParseRMC renvoie false si le statut du fix GNSS n'est pas valide ("A").
+       // NMEA0183ParseRMC renvoie false si le statut du fix GNSS n'est pas valide ("A").
       // RMC est suffisant pour une alarme N2K PGN127233
       if (NMEA0183ParseRMC(N0183Msg, gGPSTime, gLatitude, gLongitude, gCOG, gSOG, gDaysSince1970, MagneticVariation)) {
-         gGNSSFixValid = bGNSSLedStatus = true;
          GNSSFixValidMillis = millis();
          LastGNNS_data.GPSTime = gGPSTime;
          LastGNNS_data.Latitude = gLatitude;
@@ -377,9 +375,7 @@ void Handle_GNSS_NMEA0183Msg(const tNMEA0183Msg &N0183Msg) {
       } 
    }
    else if (N0183Msg.IsMessageCode("GGA")) {
-      gGNSSFixValid = false;
       if (NMEA0183ParseGGA(N0183Msg, gGPSTime, gLatitude, gLongitude, gQualityIndicator, gSatelliteCount, gHDOP, gAltitude, gGeoidalSeparation, gDGPSAge, gDGPSReferenceStationID )) {
-         gGNSSFixValid = bGNSSLedStatus = true;
          GNSSFixValidMillis = millis();
          LastGNNS_data.GPSTime = gGPSTime;
          LastGNNS_data.Latitude = gLatitude;
@@ -413,10 +409,10 @@ void loop() {
       GNSS_UDP.parsePacket();
       NMEA0183in.ParseMessages();
    }
-   bGNSSLedStatus = millis() < (GNSSFixValidMillis + uiG_TimeOut);
-   digitalWrite(GNSSLed, bGNSSLedStatus);                   // ON if GNSS position is valid
+   bGNSS_StillValid = millis() < (GNSSFixValidMillis + uiG_TimeOut);
+   digitalWrite(GNSSLed, bGNSS_StillValid);                   // ON if GNSS position is valid
    
-   if (bButtonMOBPressed) {
+   if (bGNSS_StillValid && bButtonMOBPressed) {
       detachInterrupt(digitalPinToInterrupt(buttonMOB));    // détacher pour éviter la réentrance
       BuildMOB(stringAIS_MOB, sizeof(stringAIS_MOB), stringWPL_MOB, sizeof(stringWPL_MOB));       // build AIS_MOB and WPL_MOB sentences 
       nCount = 0;
@@ -429,10 +425,10 @@ void loop() {
          delay(500);
       }
       while (++nCount < uiR_Message);
-      bButtonMOBPressed = false;
       oldMOBMillis = millis();    
       attachInterrupt(digitalPinToInterrupt(buttonMOB), onButtonMOBEvent, RISING); // réattacher
    }
+   bButtonMOBPressed = false;
    ElegantOTA.loop();
 }
 
@@ -459,14 +455,14 @@ void TransmitNmea0183(char * nmea0183string) {
 void BuildMOB(char * stringAIS_MOB, size_t AIS_MOBsize, char * stringWPL_MOB, size_t WPL_MOBsize) {
    String * sDD_to_OF;                 // array of String returned from called function
    
-   if (gGNSSFixValid && bAIS_MOB) {    // Trame AIVDM Type 14 cible AIS MOB 
+   if (bAIS_MOB) {    // Trame AIVDM Type 14 cible AIS MOB
       char payload[32];
       BuildType1Payload(payload, sizeof(payload), uiMMSI_number, LastGNNS_data.Latitude, LastGNNS_data.Longitude,
                            true, LastGNNS_data.trueCOG, LastGNNS_data.SOG);
-      snprintf(stringAIS_MOB, AIS_MOBsize, "$AIVDM,1,1,,A,%s,0",payload);
+      snprintf(stringAIS_MOB, AIS_MOBsize, "!AIVDM,1,1,,A,%s,0",payload);
       AddChecksum(stringAIS_MOB);
    }   
-   if (gGNSSFixValid && bWPL_MOB) {    // Trame WPL "MOB" 
+   if (bWPL_MOB) {    // Trame WPL "MOB" 
       sDD_to_OF = DecimalDegreesFormat_v2(DMD_position_format, LastGNNS_data.Latitude, LastGNNS_data.Longitude);
       snprintf(stringWPL_MOB, WPL_MOBsize, "$GPWPL,%s,%s,%s", sDD_to_OF[LAT], sDD_to_OF[LNG], "MOB");
       AddChecksum(stringWPL_MOB);
