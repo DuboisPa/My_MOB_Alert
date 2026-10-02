@@ -96,7 +96,7 @@ String sVersion_number = "Nmea0183 v0.99", sVersion = __DATE__;
 #define MOB_TRIGGER           2000  // déclencle le MOB après un appui de x millisecondes
 
 #define WDT_TIMEOUT           15    // watchdog matériel. redemarre l'appareil si la boucle principale reste bloquee plus de 15s
-//#define WIFI_RECONNECT 15        // in STA mode, try to reconnect every 15s if WiFi disconnected
+//#define WIFI_RECONNECT 15          // in STA mode, try to reconnect every 15s if WiFi disconnected
 
 //#define NMEA2K_CODE
 #if defined NMEA2K_CODE 
@@ -215,8 +215,8 @@ class tAISPayloadBuilder {
 };
 
 bool bGNSS_StillValid = false;  // true si un fix RMC ou GGA valide a ete recu
-uint32_t GNSSFixValidMillis;
-uint32_t newMillis, oldMillis, oldMOBMillis;
+uint32_t GNSSFixValidMillis = -9999;
+uint32_t oldMOBMillis;
 
 // to use json to load and save configuration file
 JsonDocument jConfig;
@@ -337,59 +337,7 @@ void setup() {
    // if (bM_Udp) {};   // nothing to do here, started in WiFi_Init() if selected   // UDP output
    // if (bM_N2K) {};   // will start GNNS by N2K                                   // N2K output
    
-   oldMillis = oldMOBMillis = GNSSFixValidMillis = millis();
-}
-
-// Handler appele par la librairie NMEA0183 pour chaque trame recue et
-// reconnue. On traite ici les trames RMC (position/cap/vitesse/date) et GGA
-void Handle_GNSS_NMEA0183Msg(const tNMEA0183Msg &N0183Msg) {
-   // Dernieres valeurs GNSS recues (mises a jour depuis la trame RMC)
-   double   gGPSTime;                        // seconds since UTC midnight
-   double   gLatitude;                       // decimal degrees
-   double   gLongitude;                      // decimal degrees
-   double   gCOG;                            // COG true (cap fond), in radians
-   double   gSOG;                            // Speed Over Ground, in m/s
-   unsigned long gDaysSince1970 = 0;         // date, in days since 1970-01-01
-   double   MagneticVariation;               // magnetic variation
-   // Dernieres valeurs GNSS recues (mises a jour depuis la trame GGA, en plus de celles ci-dessus)
-   int      gQualityIndicator;               // Quality indicator, 0 = not available, 1 = GPS fix
-   int      gSatelliteCount;                 // Number of satellites in use (0-12)
-   double   gHDOP;                           // Horizontal dilution
-   double   gAltitude;                       // Antenna Altitude above/bealow mean sea level, in metters
-   double   gGeoidalSeparation;              
-   double   gDGPSAge;
-   int      gDGPSReferenceStationID;
-   
-   if (N0183Msg.IsMessageCode("RMC")) {
-       // NMEA0183ParseRMC renvoie false si le statut du fix GNSS n'est pas valide ("A").
-      // RMC est suffisant pour une alarme N2K PGN127233
-      if (NMEA0183ParseRMC(N0183Msg, gGPSTime, gLatitude, gLongitude, gCOG, gSOG, gDaysSince1970, MagneticVariation)) {
-         GNSSFixValidMillis = millis();
-         LastGNNS_data.GPSTime = gGPSTime;
-         LastGNNS_data.Latitude = gLatitude;
-         LastGNNS_data.Longitude = gLongitude;
-         LastGNNS_data.trueCOG = gCOG;
-         LastGNNS_data.SOG = gSOG ;
-         LastGNNS_data.daysSince1970 = gDaysSince1970;
-         LastGNNS_data.MagneticVariation = MagneticVariation ;
-      } 
-   }
-   else if (N0183Msg.IsMessageCode("GGA")) {
-      if (NMEA0183ParseGGA(N0183Msg, gGPSTime, gLatitude, gLongitude, gQualityIndicator, gSatelliteCount, gHDOP, gAltitude, gGeoidalSeparation, gDGPSAge, gDGPSReferenceStationID )) {
-         GNSSFixValidMillis = millis();
-         LastGNNS_data.GPSTime = gGPSTime;
-         LastGNNS_data.Latitude = gLatitude;
-         LastGNNS_data.Longitude = gLongitude;
-         LastGNNS_data.GPSQualityIndicator = gQualityIndicator;
-         LastGNNS_data.satelliteCount = gSatelliteCount;
-         LastGNNS_data.HDOP = gHDOP;
-         LastGNNS_data.Altitude = gAltitude;
-         LastGNNS_data.geoidalSeparation = gGeoidalSeparation;
-         LastGNNS_data.DGPSAge = gDGPSAge;
-         LastGNNS_data.DGPSReferenceStationID = gDGPSReferenceStationID;
-      } 
-   }
-   //Serial.println("hello from Handle_GNSS_NMEA0183Msg");
+   oldMOBMillis = millis();
 }
 
 void loop() {
@@ -446,6 +394,60 @@ void TransmitNmea0183(char * nmea0183string) {
       AP_UDP.print(nmea0183string);
       AP_UDP.endPacket();      
    }
+}
+
+// Handler appele par la librairie NMEA0183 pour chaque trame recue et
+// reconnue. On traite ici les trames RMC (position/cap/vitesse/date) et GGA
+void Handle_GNSS_NMEA0183Msg(const tNMEA0183Msg &N0183Msg) {
+   // Dernieres valeurs GNSS recues (mises a jour depuis la trame RMC)
+   double   gGPSTime;                        // seconds since UTC midnight
+   double   gLatitude;                       // decimal degrees
+   double   gLongitude;                      // decimal degrees
+   double   gCOG;                            // COG true (cap fond), in radians
+   double   gSOG;                            // Speed Over Ground, in m/s
+   unsigned long gDaysSince1970 = 0;         // date, in days since 1970-01-01
+   double   MagneticVariation;               // magnetic variation
+   // Dernieres valeurs GNSS recues (mises a jour depuis la trame GGA, en plus de celles ci-dessus)
+   int      gQualityIndicator;               // Quality indicator, 0 = not available, 1 = GPS fix
+   int      gSatelliteCount;                 // Number of satellites in use (0-12)
+   double   gHDOP;                           // Horizontal dilution
+   double   gAltitude;                       // Antenna Altitude above/bealow mean sea level, in metters
+   double   gGeoidalSeparation;              
+   double   gDGPSAge;
+   int      gDGPSReferenceStationID;
+   
+   if (N0183Msg.IsMessageCode("RMC")) {
+       // NMEA0183ParseRMC renvoie false si le statut du fix GNSS n'est pas valide ("A").
+      // RMC est suffisant pour une alarme N2K PGN127233
+      if (NMEA0183ParseRMC(N0183Msg, gGPSTime, gLatitude, gLongitude, gCOG, gSOG, gDaysSince1970, MagneticVariation)) {
+         LastGNNS_data.GPSTime = gGPSTime;
+         LastGNNS_data.Latitude = gLatitude;
+         LastGNNS_data.Longitude = gLongitude;
+         LastGNNS_data.trueCOG = gCOG;
+         LastGNNS_data.SOG = gSOG ;
+         LastGNNS_data.daysSince1970 = gDaysSince1970;
+         LastGNNS_data.MagneticVariation = MagneticVariation ;
+         if (gLatitude + gLongitude > 0)     // not working if we are exactly at North Pole
+            GNSSFixValidMillis = millis();
+      } 
+   }
+   else if (N0183Msg.IsMessageCode("GGA")) {
+      if (NMEA0183ParseGGA(N0183Msg, gGPSTime, gLatitude, gLongitude, gQualityIndicator, gSatelliteCount, gHDOP, gAltitude, gGeoidalSeparation, gDGPSAge, gDGPSReferenceStationID )) {
+         LastGNNS_data.GPSTime = gGPSTime;
+         LastGNNS_data.Latitude = gLatitude;
+         LastGNNS_data.Longitude = gLongitude;
+         LastGNNS_data.GPSQualityIndicator = gQualityIndicator;
+         LastGNNS_data.satelliteCount = gSatelliteCount;
+         LastGNNS_data.HDOP = gHDOP;
+         LastGNNS_data.Altitude = gAltitude;
+         LastGNNS_data.geoidalSeparation = gGeoidalSeparation;
+         LastGNNS_data.DGPSAge = gDGPSAge;
+         LastGNNS_data.DGPSReferenceStationID = gDGPSReferenceStationID;
+         if (gLatitude + gLongitude > 0)     // not working if we are exactly at North Pole
+            GNSSFixValidMillis = millis();
+      } 
+   }
+   //Serial.println("hello from Handle_GNSS_NMEA0183Msg");
 }
 
 // Envoie l'alerte MOB en NMEA0183 : une trame WPL "MOB" + une trame AIVDM simulant une cible AIS de type MOB,
