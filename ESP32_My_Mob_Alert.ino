@@ -3,9 +3,11 @@
    object : autonomous system to send a MOB alert on board instruments (not on VHF or AIS transmitter/recepteur)
             Nmea0183 and/or Nmea2000
   
-   target : ESP32 Dev Module     
+   target : ESP32-Wroom-32 Dev Module     
+            ESP32S3 N16R8 https://github.com/microrobotics/ESP32-S3-N16R8/blob/main/ESP32-S3-N16R8_User_Guide.pdf
             temporary push-button to reset config (optional)
             temporary push-button to send MOB alert
+            active buzzer (or speaker or ...) (optional)
             voltage regulator LM2596D
             
             for volts 3.3 volts and intensity 20mA:
@@ -30,8 +32,8 @@
 
    GNSS sentences
    input  TTL     :  OK, GNSS chipset on TTL
-   input  RS232   :  OK, testé avec Python UDP vers Serial, ESP32 Serial vers UDP (OpenCPN sur autre PC)
-   input  RS422   :  OK, testé avec Python UDP vers Serial, ESP32 Serial vers UDP (OpenCPN sur autre PC)
+   input  RS232   :  OK, tried with a Python program UDP to Serial, ESP32 Serial to UDP (OpenCPN on other PC)
+   input  RS422   :  OK, tried with a Python program UDP to Serial, ESP32 Serial to UDP (OpenCPN on other PC)
    input  UDP     :  OK
    input  N2K     : 
  
@@ -48,6 +50,11 @@ String sVersion_number = "Nmea0183 v0.99", sVersion = __DATE__;
 // Import required libraries
 // if the library is global   use <>
 // if the library is local    use ""
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+//#include "driver/gpio.h"
+
 #include <ArduinoJson.h>            // https://arduinojson.org/
 #include <AsyncTCP.h>               // Async TCP by ESP32Async
 #include <ElegantOTA.h>             // ElagantOTA by Ayush Sharma warning if library is updated https://docs.elegantota.pro/getting-started/async-mode
@@ -66,7 +73,7 @@ String sVersion_number = "Nmea0183 v0.99", sVersion = __DATE__;
 
 #define button0Pin            0     // (pin 25) GPIO 0 or PRG button
 #define buttonMOB             27    // (pin 11)
-#define BuiltInLed            2     // GPIO led allumée par erreur dans la boucle Wifi not connected ?
+#define BuiltInLed            2     // GPIO led ON on some ESP32 after WiFi on
 // these 2 leds are blinking if a MOB alert has been set
 #define P_ONLed               25    // (pin  9) red light, system is ON
 #define GNSSLed               26    // (pin 10) green led, GNNS is valid
@@ -93,10 +100,13 @@ String sVersion_number = "Nmea0183 v0.99", sVersion = __DATE__;
 #define GNSSSerial            Serial1  // rx1GPIO tx1GPIO
 #define MOBRSxxxSerial        Serial2  // rx2GPIO tx2GPIO
 
-#define MOB_TRIGGER           2000  // déclencle le MOB après un appui de x millisecondes
+#define MOB_TRIGGER           2000  // triggers the AIS-SART and/or MOB after the button has been pressed x milliseconds
 
-#define WDT_TIMEOUT           15    // watchdog matériel. redemarre l'appareil si la boucle principale reste bloquee plus de 15s
+#define WDT_TIMEOUT           15    // watchdog matériel. restart the ESP32 if the main loop is locked more than 15 seconds
 //#define WIFI_RECONNECT 15          // in STA mode, try to reconnect every 15s if WiFi disconnected
+
+// uncomment this line if you want the buzzer
+//#define USE_BUZZER                  // https://garrysblog.com/2022/12/16/experimenting-with-audio-tones-using-the-esp32-for-use-in-projects/
 
 //#define NMEA2K_CODE
 #if defined NMEA2K_CODE 
@@ -106,12 +116,12 @@ String sVersion_number = "Nmea0183 v0.99", sVersion = __DATE__;
       // GPIO definitions must be placed before
       #define ESP32_CAN_TX_PIN GPIO_NUM_23   // default is GPIO_NUM_16 
       #define ESP32_CAN_RX_PIN GPIO_NUM_22   // default is GPIO_NUM_4
-      #include <NMEA2000_CAN.h>     // Selectionne automatiquement le driver CAN (ESP32 ici) 
-   #elif defined(ARDUINO_ESP32S3_DEV) // || defined(ARDUINO_ESP32C3_DEV))
+      #include <NMEA2000_CAN.h>     // Automatically select the CAN driver (here an ESP32-Wroom-32) 
+   #elif defined(ARDUINO_ESP32S3_DEV)
       // https://github.com/ktand/NMEA2000_esp32_twai
       // GPIO definitions must be placed before
-      #define ESP32_CAN_TX_PIN GPIO_NUM_23   // default is GPIO_NUM_16 
-      #define ESP32_CAN_RX_PIN GPIO_NUM_22   // default is GPIO_NUM_4
+      #define CAN_TX_PIN GPIO_NUM_23   // default is GPIO_NUM_16 
+      #define CAN_RX_PIN GPIO_NUM_22   // default is GPIO_NUM_4
       #include "NMEA2000_esp32.h"
    #elif defined(ARDUINO_ESP32C3_DEV)
       #define CAN_TX_GPIO GPIO_NUM_9
@@ -147,7 +157,6 @@ uint32_t baudMOBUSB = 38400, baudMOBSerial;
 bool bDisplay = false;
 volatile bool bButtonResetPressed = false, bButtonMOBPressed = false;
 
-//The udp library class
 // we receive GNNS data on GNSS_UDP if enabled, and we send MOB alerts on STA_UDP and/or AP_UDP if enabled
 WiFiUDP GNSS_UDP, STA_UDP, AP_UDP ;      // WiFiUDP est un typedef de NetworkUDP
 
@@ -168,6 +177,7 @@ struct GNNS_Coordinates {
 	double geoidalSeparation;     // GGA
 	double DGPSAge;               // GGA
 	int DGPSReferenceStationID;   // GGA
+   uint32_t LastFix = -9999;
 };
 GNNS_Coordinates LastGNNS_data;
 
@@ -215,14 +225,14 @@ class tAISPayloadBuilder {
 };
 
 bool bGNSS_StillValid = false;  // true si un fix RMC ou GGA valide a ete recu
-uint32_t GNSSFixValidMillis = -9999;
+//uint32_t GNSSFixValidMillis = -9999;
 uint32_t oldMOBMillis;
 
 // to use json to load and save configuration file
 JsonDocument jConfig;
 String jsonReplyString;
 
-// Initialize HTTP server
+// Init HTTP server
 #define Web_Server_Port       80
 AsyncWebServer server(Web_Server_Port);
 
@@ -241,8 +251,16 @@ void Storage_Init(void);                                                        
 void TransmitNmea0183(char * nmea0183string);
 void WiFi_Init(void);                                                            // as the name :-)
 void WSettingsRW(JsonDocument& jnewConfig, byte configValue);                    // reset, load and store json config file
-String YYYY_MM_DD(unsigned long daysSince1970);
+//String YYYY_MM_DD(unsigned long daysSince1970);
 // end declarations
+
+#if defined USE_BUZZER
+   #define LEDCPin            13          // Define output pin for speaker
+   #define LEDCResolution     10          // Set resolution to 10 bits
+   #define TaskCore0           0
+   #define TaskCore1           1
+   TaskHandle_t BuzzerTaskHandle = NULL;
+#endif
 
 void IRAM_ATTR onButtonResetEvent() {
    bButtonResetPressed = true;
@@ -259,7 +277,7 @@ void convertFromJson(JsonVariantConst source, IPAddress& dest) {
 void setup() {
 
    btStop();
-   MOBUSBSerial.begin(baudMOBUSB);         // Serial USB, toujours démarré, arrété ou modifié selon config
+   MOBUSBSerial.begin(baudMOBUSB);         // Serial USB, always started at startup, then following settings
    DisplayIMessage("\nMy MOB Alert");
    DisplayIMessage(sVersion_number + " compiled on " + sVersion);
    
@@ -275,7 +293,6 @@ void setup() {
    Storage_Init();
    WSettingsRW(jConfig, CONFIGREAD);
    WiFi_Init();
-   
    digitalWrite(BuiltInLed, LOW);         // ON after Wifi connection so set it OFF
 
    // manage web pages and load/save configuration
@@ -303,7 +320,7 @@ void setup() {
    ElegantOTA.begin(&server);   
    server.begin();
    
-   // Watchdog armé, impérativement après les initialisations
+   // Watchdog armé
    esp_task_wdt_config_t wdt_config = {
       .timeout_ms = WDT_TIMEOUT * 1000,                 // Convertin ms
       .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,  // Bitmask of all cores, https://github.com/espressif/esp-idf/blob/v5.2.2/examples/system/task_watchdog/main/task_watchdog_example_main.c
@@ -337,6 +354,17 @@ void setup() {
    // if (bM_Udp) {};   // nothing to do here, started in WiFi_Init() if selected   // UDP output
    // if (bM_N2K) {};   // will start GNNS by N2K                                   // N2K output
    
+   #if defined USE_BUZZER
+      // Buzzer in an independant task
+      // https://docs.espressif.com/projects/esp-idf/en/v4.3/esp32/api-reference/system/freertos.html
+      // The stack size can be computed in the task function and adjusted
+      // xTaskCreate(TriggerBuzzer, "TriggerBuzzer", 1768, NULL, 5, &BuzzerTaskHandle);
+      xTaskCreatePinnedToCore(TriggerBuzzer, "TriggerBuzzer", 1768, NULL, 5, &BuzzerTaskHandle, tskNO_AFFINITY);     // any core
+      // comment the 2 following lines if a test is not needed at startup
+      ledcAttach(LEDCPin, 50, LEDCResolution);           // Attach pin before starting tone
+      vTaskResume(BuzzerTaskHandle);                     // Buzzer is an independant task
+   #endif
+   
    oldMOBMillis = millis();
 }
 
@@ -357,13 +385,17 @@ void loop() {
       GNSS_UDP.parsePacket();
       NMEA0183in.ParseMessages();
    }
-   bGNSS_StillValid = millis() < (GNSSFixValidMillis + uiG_TimeOut);
-   digitalWrite(GNSSLed, bGNSS_StillValid);                   // ON if GNSS position is valid
+
+   bGNSS_StillValid = millis() < (LastGNNS_data.LastFix + uiG_TimeOut);
+   digitalWrite(GNSSLed, bGNSS_StillValid);                 // ON if GNSS position is valid
    
    if (bGNSS_StillValid && bButtonMOBPressed) {
-      detachInterrupt(digitalPinToInterrupt(buttonMOB));    // détacher pour éviter la réentrance
+      detachInterrupt(digitalPinToInterrupt(buttonMOB));    // detach to avoid a second trigger
       BuildMOB(stringAIS_MOB, sizeof(stringAIS_MOB), stringWPL_MOB, sizeof(stringWPL_MOB));       // build AIS_MOB and WPL_MOB sentences 
-      nCount = 0;
+      #if defined USE_BUZZER
+         ledcAttach(LEDCPin, 50, LEDCResolution);           // Attach pin before starting tone
+         vTaskResume(BuzzerTaskHandle);                     // Buzzer is an independant task
+      #endif
       do {                                                  // LED blinking & Transmit sentences
          if (bAIS_MOB) {TransmitNmea0183(stringAIS_MOB);}
          if (bWPL_MOB) {TransmitNmea0183(stringWPL_MOB);}
@@ -374,25 +406,47 @@ void loop() {
       }
       while (++nCount < uiR_Message);
       oldMOBMillis = millis();    
-      attachInterrupt(digitalPinToInterrupt(buttonMOB), onButtonMOBEvent, RISING); // réattacher
+      attachInterrupt(digitalPinToInterrupt(buttonMOB), onButtonMOBEvent, RISING); // attach again
    }
    bButtonMOBPressed = false;
    ElegantOTA.loop();
 }
 
+#if defined USE_BUZZER
+   void TriggerBuzzer(void *pvParameters) {              // Buzzer is an independant task
+      int nCount = 0;
+
+      while (true) {
+         ledcWriteTone(LEDCPin, 435);                    // 435Hz Pompier for 0.5 second
+         vTaskDelay(pdMS_TO_TICKS(500));
+         ledcWriteTone(LEDCPin, 488);                    // 488Hz Pompier for 0.5 second
+         vTaskDelay(pdMS_TO_TICKS(500));
+         if (++nCount == 5) {
+            ledcDetach(LEDCPin);                         // noSound()                             
+            vTaskSuspend(NULL);
+            nCount = 0;
+         }
+         //UBaseType_t marge_octets = uxTaskGetStackHighWaterMark(NULL);
+         //printf("Marge minimale de pile : %u octets\n", (unsigned)marge_octets);
+      }
+   }
+#endif
+
 void TransmitNmea0183(char * nmea0183string) {
 
    if (bM_SerialU) { MOBUSBSerial.println(nmea0183string); }
    if (bM_Serial) { MOBRSxxxSerial.println(nmea0183string); }
-   if (bM_Udp && bSTAmode) {
-      STA_UDP.beginPacket(STAbroadcastIP, uiM_Port);  // broadcast_IP
-      STA_UDP.print(nmea0183string);
-      STA_UDP.endPacket();      
-   }
-   if (bM_Udp && bAPmode) {
-      AP_UDP.beginPacket(APbroadcastIP, uiM_Port);  // broadcast_IP
-      AP_UDP.print(nmea0183string);
-      AP_UDP.endPacket();      
+   if (bM_Udp) {
+      if (bSTAmode) {
+         STA_UDP.beginPacket(STAbroadcastIP, uiM_Port);  // broadcast_IP
+         STA_UDP.print(nmea0183string);
+         STA_UDP.endPacket();      
+      }
+      if (bAPmode) {
+         AP_UDP.beginPacket(APbroadcastIP, uiM_Port);  // broadcast_IP
+         AP_UDP.print(nmea0183string);
+         AP_UDP.endPacket();      
+      }
    }
 }
 
@@ -417,8 +471,6 @@ void Handle_GNSS_NMEA0183Msg(const tNMEA0183Msg &N0183Msg) {
    int      gDGPSReferenceStationID;
    
    if (N0183Msg.IsMessageCode("RMC")) {
-       // NMEA0183ParseRMC renvoie false si le statut du fix GNSS n'est pas valide ("A").
-      // RMC est suffisant pour une alarme N2K PGN127233
       if (NMEA0183ParseRMC(N0183Msg, gGPSTime, gLatitude, gLongitude, gCOG, gSOG, gDaysSince1970, MagneticVariation)) {
          LastGNNS_data.GPSTime = gGPSTime;
          LastGNNS_data.Latitude = gLatitude;
@@ -428,7 +480,7 @@ void Handle_GNSS_NMEA0183Msg(const tNMEA0183Msg &N0183Msg) {
          LastGNNS_data.daysSince1970 = gDaysSince1970;
          LastGNNS_data.MagneticVariation = MagneticVariation ;
          if (gLatitude + gLongitude > 0)     // not working if we are exactly at North Pole
-            GNSSFixValidMillis = millis();
+            LastGNNS_data.LastFix = millis();
       } 
    }
    else if (N0183Msg.IsMessageCode("GGA")) {
@@ -444,10 +496,9 @@ void Handle_GNSS_NMEA0183Msg(const tNMEA0183Msg &N0183Msg) {
          LastGNNS_data.DGPSAge = gDGPSAge;
          LastGNNS_data.DGPSReferenceStationID = gDGPSReferenceStationID;
          if (gLatitude + gLongitude > 0)     // not working if we are exactly at North Pole
-            GNSSFixValidMillis = millis();
+            LastGNNS_data.LastFix = millis();
       } 
    }
-   //Serial.println("hello from Handle_GNSS_NMEA0183Msg");
 }
 
 // Envoie l'alerte MOB en NMEA0183 : une trame WPL "MOB" + une trame AIVDM simulant une cible AIS de type MOB,
@@ -504,14 +555,13 @@ void BuildType1Payload(char *outPayload, size_t outPayloadSize, uint32_t MMSI_nu
       sogTenthsKn = (uint16_t)constrain(round(sog * 1.9438444924406047516198704103672 * 10.0), 0, 1022);
    }
    b.AddUInt(sogTenthsKn, 10);            // SOG en 1/10 de noeud
-   b.AddUInt(0, 1);                       // Position Accuracy (0 = par defaut)
+   b.AddUInt(0, 1);                       // Position Accuracy (0 = by default)
    b.AddInt((int32_t)round(longitude * 600000.0), 28);   // position is valid, else this function is not called
    b.AddInt((int32_t)round(latitude  * 600000.0), 27);   // position is valid, else this function is not called
    uint16_t cogTenthsDeg = 3600;
    if (bcogSogValid) {
       double cogDeg = cog * 180.0 / M_PI;  // conversion radians -> degres
       cogTenthsDeg = (uint16_t)constrain(round(cogDeg * 10.0), 0, 3599);
-      // cogTenthsDeg = (uint16_t) constrain(round(RadToDeg(cog) * 10.0), 0, 3599); // NMEA2000 library
    } 
    b.AddUInt(cogTenthsDeg, 12);           // COG en 1/10 de degre
    b.AddUInt(511, 9);                     // Cap vrai (Heading) non disponible
@@ -784,7 +834,7 @@ String YYYY_MM_DD(unsigned long daysSince1970) {
   snprintf(cReturn, sizeof(cReturn), "%04d-%02d-%02d", dateInfo.tm_year + 1900, dateInfo.tm_mon + 1, dateInfo.tm_mday);
   return cReturn;
 }
- 
+
 void DisplayIMessage(String sMessage, bool bClear, bool bCRLN) {
    //static int nRow = 0;  / not needed in this simplified version
 
