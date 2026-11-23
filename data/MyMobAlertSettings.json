@@ -11,7 +11,7 @@
   "DHCP": true,
   "Static": false,
   "STASSID": "SSID_to_change",
-  "STAPassword": "Password_to_change",
+  "STAPassword": "password_to_change",
   "STAlocalIP": "192.168.1.64",
   "STAsubnetMaskIP": "255.255.255.0",
   "STAgatewayIP": "192.168.1.254",
@@ -23,7 +23,8 @@
   "G_Pgn": 129029,
   "G_TimeOut": 15,
   "MMSI_number": 972990001,
-  "AIS_MOB": false,
+  "AIS_SART_t1": false,
+  "AIS_SART_t14": false,
   "WPL_MOB": true,
   "R_Message": 1,
   "M_SerialU": false,
@@ -32,6 +33,5 @@
   "M_SerialB": 38400,
   "M_Udp": false,
   "M_Port": 10110,
-  "M_N2K": false,
-  "M_Pgn": 127233
+  "M_N2K": false
 }
